@@ -1,81 +1,90 @@
-from fastapi import APIRouter, HTTPException
-from .. import schemas
-from ..mock_db import db # เรียกใช้ข้อมูลกลาง
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from .. import schemas, models
+from ..database import get_db
 import httpx
-import math 
 import random
 
-router = APIRouter(prefix="/api", tags=["Practice"])
+router = APIRouter(tags=["Practice"])
 
-# URL ของ n8n
-N8N_WEBHOOK_URL = "https://ruy888.app.n8n.cloud/webhook-test/39f316ea-5f48-4f4f-8123-b7922ea6cd3c" 
+# 🔴 URL ของ n8n (ตรวจสอบให้แน่ใจว่า Workflow ใน n8n กำลังกด Execute รออยู่ หรือ Activate แล้ว)
+N8N_WEBHOOK_URL = "https://ruy888.app.n8n.cloud/webhook-test/39f316ea-5f48-4f4f-8123-b7922ea6cd3c"
 
-def get_word_difficulty(word: str) -> str:
-    word = word.lower()
-    advanced = ["serendipity", "ephemeral", "mellifluous", "ubiquitous", "ambivalent"]
-    intermediate = ["resilient", "perspective", "ambition", "runway", "construction"]
-    if word in advanced: return "Advanced"
-    elif word in intermediate: return "Intermediate"
-    return "Beginner"
-
-@router.post("/validate-sentence", response_model=schemas.AIResponse)
-async def validate_sentence(payload: schemas.SentenceInput):
-    sentence = payload.sentence.strip()
-    target_word = payload.word_text
+@router.post("/validate-sentence", response_model=schemas.ValidateSentenceResponse)
+async def validate_sentence(payload: schemas.ValidateSentenceRequest, db: Session = Depends(get_db)):
+    print(f"🚀 Sending to n8n: Word='{payload.word_text}', Sentence='{payload.sentence}'")
     
-    # -------------------------------------------------------------
-    # 1. ถ้าไม่มีคำศัพท์ -> ปรับตก (ไม่บวกจำนวนครั้ง)
-    # -------------------------------------------------------------
-    if target_word.lower() not in sentence.lower():
-        return {
-            "score": 0.0,
-            "level": "Beginner",
-            "suggestion": f"ได้รับ 0 คะแนน เนื่องจากในประโยคไม่มีคำศัพท์ '{target_word}' ตามโจทย์กำหนด",
-            "corrected_sentence": sentence
-        }
+    # 1. ดึงข้อมูลคำศัพท์
+    word_item = db.query(models.Word).filter(models.Word.word == payload.word_text).first()
+    word_id = word_item.id if word_item else 0
+    difficulty = word_item.difficulty_level if word_item else "Beginner"
 
-    # -------------------------------------------------------------
-    # 2. ถ้าผ่านด่านแรก -> ถือว่าส่งงานสำเร็จ -> บวกจำนวนครั้งทันที!
-    # -------------------------------------------------------------
-    db["total_sentences"] += 1  # <--- จุดที่เพิ่ม: บวกเลขตรงนี้!
-    
-    # -------------------------------------------------------------
-    # 3. ส่งไปตรวจ (n8n หรือ Mock)
-    # -------------------------------------------------------------
+    ai_result = {}
+
+    # 2. เชื่อมต่อ n8n (AI)
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(N8N_WEBHOOK_URL, json={"word": target_word, "sentence": sentence}, timeout=3.0)
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    "score": data.get("score", 0),
-                    "level": data.get("level", "Beginner"),
-                    "suggestion": data.get("suggestion", "-"),
-                    "corrected_sentence": data.get("corrected_sentence", sentence)
-                }
-    except:
-        pass 
+            # เพิ่ม timeout 30 วินาที (เผื่อ AI คิดนาน)
+            response = await client.post(
+                N8N_WEBHOOK_URL,
+                json={
+                    "sentence": payload.sentence,
+                    "word": payload.word_text,
+                    "difficulty": difficulty  # ส่งระดับความยากไปด้วย เพื่อให้ AI ปรับเกณฑ์คะแนน
+                },
+                timeout=30.0 
+            )
+        
+        # เช็คว่า n8n ตอบกลับมาจริงไหม
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ n8n Response: {data}") # ดู Log ตรงนี้ว่า n8n ตอบอะไรกลับมา
 
-    # Mock Logic
-    word_count = len(sentence.split())
-    score = 0.0
-    score += min(8.0, word_count * 0.8)
-    
-    difficulty = get_word_difficulty(target_word)
-    if difficulty == "Intermediate": score += 1.0
-    elif difficulty == "Advanced": score += 2.0
-    else: score += 0.5
-    
-    suggestion = "Good job! You used the vocabulary correctly."
-    final_score = min(10.0, round(score, 1))
+            # ตรวจสอบว่า n8n ส่งคะแนนมาเป็นตัวเลขหรือไม่
+            raw_score = data.get("score", 0)
+            if isinstance(raw_score, str):
+                try:
+                    score = float(raw_score)
+                except:
+                    score = 0.0
+            else:
+                score = float(raw_score)
 
-    if final_score < 5: level = "Beginner"
-    elif final_score < 8: level = "Intermediate"
-    else: level = "Advanced"
+            ai_result = {
+                "score": score,
+                "level": data.get("level", difficulty),
+                "suggestion": data.get("suggestion", "Good job! (No suggestion from AI)"),
+                "corrected_sentence": data.get("corrected_sentence", payload.sentence)
+            }
+        else:
+            print(f"❌ n8n Error Status: {response.status_code}")
+            print(f"❌ n8n Body: {response.text}")
+            raise Exception("n8n responded with error")
 
-    return {
-        "score": final_score,
-        "level": level,
-        "suggestion": suggestion,
-        "corrected_sentence": sentence.capitalize()
-    }
+    except Exception as e:
+        print(f"⚠️ Connection Failed: {e}")
+        print("⚠️ --> Using Fallback Mock Data (คะแนนจะไม่ตรงความเป็นจริง)")
+        
+        # Mock คะแนนแก้ขัด (กรณีต่อ AI ไม่ติดจริงๆ)
+        ai_result = {
+            "score": 5.0,
+            "level": difficulty,
+            "suggestion": "System could not connect to AI. Please check n8n Webhook.",
+            "corrected_sentence": payload.sentence
+        }
+
+    # 3. บันทึกลง Database
+    try:
+        new_submission = models.PracticeSubmission(
+            user_id=1,
+            word_id=word_id,
+            submitted_sentence=payload.sentence,
+            score=ai_result["score"]
+        )
+        db.add(new_submission)
+        db.commit()
+        db.refresh(new_submission)
+    except Exception as db_err:
+        print(f"❌ Database Error: {db_err}")
+
+    return ai_result

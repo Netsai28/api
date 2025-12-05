@@ -1,40 +1,28 @@
-from sqlalchemy import Column, Integer, String, Text, DECIMAL, TIMESTAMP, Enum as SQLEnum
-from sqlalchemy import Column, Integer, String, Float, DateTime
-from datetime import datetime
+from sqlalchemy import Column, Integer, String, Text, Float, DateTime
 from sqlalchemy.sql import func
-from app.database import Base
-
+from .database import Base
 
 class Word(Base):
     __tablename__ = "words"
     
     id = Column(Integer, primary_key=True, index=True)
-    word = Column(String(100), unique=True, nullable=False)
-    definition = Column(Text)
-    difficulty_level = Column(
-        SQLEnum('Beginner', 'Intermediate', 'Advanced', name='difficulty'),
-        default='Beginner'
-    )
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
-
-
-class PracticeSession(Base):
-    __tablename__ = "practice_sessions"
+    word = Column(String, unique=True, nullable=False)
     
-    id = Column(Integer, primary_key=True, index=True)
-    word_id = Column(Integer, nullable=False)
-    user_sentence = Column(Text, nullable=False)
-    score = Column(DECIMAL(3, 1))
-    feedback = Column(Text)
-    corrected_sentence = Column(Text)
-    practiced_at = Column(TIMESTAMP, default=datetime.utcnow)
+    # ⚠️ จุดสำคัญ: ต้องชื่อ definition ตรงกับ seed_direct.py
+    definition = Column(Text) 
+    
+    # ⚠️ จุดสำคัญ: ต้องชื่อ difficulty_level ตรงกับ seed_direct.py
+    difficulty_level = Column(String, default='Beginner')
+    
+    part_of_speech = Column(String, default='noun')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class PracticeSubmission(Base):
     __tablename__ = "practice_submissions"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, default=1)
     word_id = Column(Integer, nullable=False)
-    submitted_sentence = Column(String(500), nullable=False)
+    submitted_sentence = Column(Text, nullable=False)
     score = Column(Float, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
