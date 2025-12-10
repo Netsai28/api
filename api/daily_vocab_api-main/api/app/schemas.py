@@ -21,6 +21,7 @@ class WordBase(BaseModel):
 
 class WordResponse(WordBase):
     id: int
+    image_url: str = None
     class Config:
         from_attributes = True
 
